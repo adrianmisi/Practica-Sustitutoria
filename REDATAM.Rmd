@@ -1,0 +1,163 @@
+---
+title: "Análisis de Índices: Vivienda y Hogares"
+output: html_document
+---
+
+## Preparación de Datos e Importación
+
+En esta primera sección, cargamos las librerías estadísiticas necesarias y realizamos la importación simultánea de ambas bases de datos.
+
+```{r setup, message=FALSE, warning=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+setwd("~/Est2_Recu")
+
+# Cargar librerías necesarias
+library(readxl)
+library(dplyr)
+library(psych)
+
+# Definir las rutas (asumiendo que están en la misma carpeta que este script)
+ruta_vivienda <- "c:/Users/adria/Documents/Est2_Recu/pregvivi.xlsx"
+ruta_hogares <- "c:/Users/adria/Documents/Est2_Recu/preghog.xlsx"
+
+# Importación de las bases de datos
+df_viv <- read_excel(ruta_vivienda)
+df_hog <- read_excel(ruta_hogares)
+
+cat("Bases de datos importadas correctamente.\n")
+```
+
+---
+
+## Parte 1: Pregunta sobre Vivienda
+
+En esta sección desarrollamos el proceso para crear el índice de vivienda (excluyendo alternativas "Otros...") para contestar a la primera pregunta de investigación.
+
+```{r analisis-vivienda, warning=FALSE}
+cat("--- Análisis para el Índice de Vivienda ---\n")
+
+# Filtramos identificadores clásicos
+cols_ignorar <- c("ID", "id", "UBIGEO", "ubigeo")
+df_viv_vars <- df_viv %>% select(-any_of(cols_ignorar))
+
+# Excluir columnas explícitas de "Otros"
+df_viv_vars <- df_viv_vars %>% select(-matches("(?i)otro"))
+
+# Reemplazar textos "Otros..." por NA en toda la base
+df_viv_vars[df_viv_vars == "Otros..."] <- NA
+df_viv_vars[df_viv_vars == "Otros"] <- NA
+df_viv_vars[df_viv_vars == "otros"] <- NA
+
+# Forzar numérico (convirtiendo texto restante a NAs)
+df_viv_vars <- df_viv_vars %>% mutate_all(~as.numeric(as.character(.)))
+
+# Eliminar columnas que se volvieron 100% NA
+df_viv_vars <- df_viv_vars %>% select(where(~ !all(is.na(.))))
+
+# Casos completos
+df_viv_vars <- na.omit(df_viv_vars)
+
+# Mantener solo variables con varianza > 0
+varianzas_viv <- apply(df_viv_vars, 2, var)
+columnas_validas_viv <- !is.na(varianzas_viv) & varianzas_viv > 0
+df_viv_vars <- df_viv_vars[, columnas_validas_viv]
+
+cat(sprintf("Datos preparados de Vivienda. Filas: %d, Columnas: %d\n\n", nrow(df_viv_vars), ncol(df_viv_vars)))
+
+# Pre-condiciones
+cor_viv <- cor(df_viv_vars)
+bartlett_viv <- cortest.bartlett(cor_viv, n = nrow(df_viv_vars))
+
+cat("[Pre-condición] Prueba de Bartlett:\n")
+if (!is.na(bartlett_viv$p.value) && bartlett_viv$p.value < 0.05) {
+  cat("  -> Se cumple la pre-condición de Bartlett (p < 0.05).\n")
+} else {
+  cat("  -> NO se cumple la pre-condición de Bartlett (Matriz Singular o p >= 0.05).\n")
+}
+
+# Reducción de dimensiones
+pca_viv <- tryCatch(principal(df_viv_vars, nfactors = 1, rotate = "none"), error = function(e) NULL)
+
+if (!is.null(pca_viv)) {
+  loadings_viv <- as.vector(pca_viv$loadings)
+  cargas_bajas_viv <- sum(abs(loadings_viv) < 0.3)
+  prop_var_viv <- pca_viv$Vaccounted["Proportion Var", 1]
+  
+  cat(sprintf("\nVariables con carga menor a 0.3: %d\n", cargas_bajas_viv))
+  cat(sprintf("Varianza total explicada: %.4f\n", prop_var_viv))
+} else {
+  cat("\nEl Análisis de Componentes Principales colapsó (no se puede extraer índice).\n")
+}
+```
+
+---
+
+## Parte 2: Pregunta sobre Hogares
+
+En esta sección desarrollamos el proceso para crear el índice de hogares (sin considerar alternativas "No tiene...") para contestar a tu segunda pregunta.
+
+```{r analisis-hogares, warning=FALSE}
+cat("--- Análisis para el Índice de Hogares ---\n")
+
+# Limpieza similar, ignorando IDs
+df_hog_vars <- df_hog %>% select(-any_of(cols_ignorar))
+
+# Reemplazamos textos de "No tiene..." por NA
+df_hog_vars[df_hog_vars == "No tiene..."] <- NA
+df_hog_vars[df_hog_vars == "No tiene"] <- NA
+df_hog_vars[df_hog_vars == "no tiene"] <- NA
+
+# Forzar a numérico y purgar 100% NAs
+df_hog_vars <- df_hog_vars %>% mutate_all(~as.numeric(as.character(.)))
+df_hog_vars <- df_hog_vars %>% select(where(~ !all(is.na(.))))
+
+# Casos completos
+df_hog_vars <- na.omit(df_hog_vars)
+
+# Validar varianza
+varianzas_hog <- apply(df_hog_vars, 2, var)
+columnas_validas_hog <- !is.na(varianzas_hog) & varianzas_hog > 0
+df_hog_vars <- df_hog_vars[, columnas_validas_hog]
+
+cat(sprintf("Datos preparados de Hogares. Filas: %d, Columnas: %d\n\n", nrow(df_hog_vars), ncol(df_hog_vars)))
+
+# 1. Evaluar si falla alguna pre-condición
+cor_hog <- cor(df_hog_vars)
+bartlett_hog <- cortest.bartlett(cor_hog, n = nrow(df_hog_vars))
+kmo_hog <- KMO(cor_hog)
+
+falla_precondicion <- FALSE
+if (is.na(bartlett_hog$p.value) || bartlett_hog$p.value >= 0.05 || kmo_hog$MSA < 0.6) {
+  falla_precondicion <- TRUE
+}
+
+cat("[1] ¿No se cumple 1 de las pre-condiciones?\n")
+cat(sprintf("   - Bartlett p-value: %s\n", ifelse(is.na(bartlett_hog$p.value), "NaN (Falla)", bartlett_hog$p.value)))
+cat(sprintf("   - KMO: %.3f\n", kmo_hog$MSA))
+cat(sprintf("   -> Resultado: %s\n\n", ifelse(falla_precondicion, "VERDADERO", "FALSO")))
+
+# PCA para Hogares
+pca_hog <- tryCatch(principal(df_hog_vars, nfactors = 1, rotate = "none"), error = function(e) NULL)
+
+if (!is.null(pca_hog)) {
+  # 2. Cargas factoriales (< 0.6)
+  loadings_hog <- as.vector(pca_hog$loadings)
+  cargas_bajas_06 <- sum(abs(loadings_hog) < 0.6)
+  
+  cat("[2] ¿Sólo dos de sus variables NO cargarían por encima de 0.6?\n")
+  cat(sprintf("   - Variables con carga < 0.6: %d\n", cargas_bajas_06))
+  cat(sprintf("   -> Resultado: %s\n\n", ifelse(cargas_bajas_06 == 2, "VERDADERO", "FALSO")))
+  
+  # 3. Varianza Explicada
+  var_exp_hog <- pca_hog$Vaccounted["Proportion Var", 1]
+  es_aprox_055 <- abs(var_exp_hog - 0.55) < 0.05
+  
+  cat("[3] ¿La varianza total explicada es de aprox. 0.55?\n")
+  cat(sprintf("   - Varianza explicada: %.4f\n", var_exp_hog))
+  cat(sprintf("   -> Resultado: %s\n\n", ifelse(es_aprox_055, "VERDADERO", "FALSO")))
+} else {
+  cat("PCA colapsó para la base de Hogares.\n")
+}
+```

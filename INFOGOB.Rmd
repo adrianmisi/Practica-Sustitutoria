@@ -1,0 +1,219 @@
+---
+title: "Análisis Electoral: Voto Castillo/Keiko vs. Infraestructura y Equipamiento"
+author: "Estadística para el Análisis Político"
+output: html_document
+---
+
+# Preparación de Datos
+
+En este bloque importaremos las tres bases de datos, extraeremos los índices de vivienda y hogar (mediante Componentes Principales como se enseñó en las sesiones pasadas), y calcularemos el ratio de votos Castillo/Keiko a nivel de provincia (o distrito electoral).
+
+```{r setup, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+setwd("~/Est2_Recu")
+
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(psych)
+library(cluster)
+
+# 1. Lectura de las bases
+df_viv_raw <- read_excel("pregvivi.xlsx", skip = 4)
+df_hog_raw <- read_excel("preghog.xlsx", skip = 4)
+# read.csv reemplaza espacios con puntos en los nombres
+df_elec_raw <- read.csv("EG2021_2V_Resultados_Presidencial - Distrito_Electoral.csv", sep = ",", encoding = "UTF-8")
+
+# 2. Creación del Índice de Vivienda
+# Asumimos que la columna 3 contiene el nombre de la Provincia
+names(df_viv_raw)[3] <- "Provincia"
+viv_id <- df_viv_raw$Provincia
+df_viv_vars <- df_viv_raw %>% select(-1:-5) %>% select(-matches("(?i)otro"))
+df_viv_vars[df_viv_vars == "Otros..."] <- NA
+suppressWarnings({ df_viv_vars <- df_viv_vars %>% mutate_all(~as.numeric(as.character(.))) })
+df_viv_vars <- df_viv_vars %>% select(where(~ !all(is.na(.))))
+df_viv_clean <- cbind(Provincia = viv_id, df_viv_vars) %>% na.omit()
+varianzas_viv <- apply(df_viv_clean[,-1], 2, var)
+df_viv_clean <- df_viv_clean[, c(TRUE, !is.na(varianzas_viv) & varianzas_viv > 0)]
+
+pca_viv <- principal(df_viv_clean[,-1], nfactors = 1, rotate = "none")
+scores_viv <- data.frame(
+  Region = toupper(gsub(", provincia: .*", "", df_viv_clean$Provincia)),
+  Provincia = toupper(gsub(".*, provincia: ", "", df_viv_clean$Provincia)),
+  indice_vivienda = pca_viv$scores[,1]
+) %>%
+  group_by(Region, Provincia) %>% summarize(indice_vivienda = mean(indice_vivienda, na.rm=TRUE), .groups='drop')
+
+# 3. Creación del Índice de Hogar
+names(df_hog_raw)[3] <- "Provincia"
+hog_id <- df_hog_raw$Provincia
+df_hog_vars <- df_hog_raw %>% select(-1:-5)
+df_hog_vars[df_hog_vars == "No tiene..."] <- NA
+suppressWarnings({ df_hog_vars <- df_hog_vars %>% mutate_all(~as.numeric(as.character(.))) })
+df_hog_vars <- df_hog_vars %>% select(where(~ !all(is.na(.))))
+df_hog_clean <- cbind(Provincia = hog_id, df_hog_vars) %>% na.omit()
+varianzas_hog <- apply(df_hog_clean[,-1], 2, var)
+df_hog_clean <- df_hog_clean[, c(TRUE, !is.na(varianzas_hog) & varianzas_hog > 0)]
+
+pca_hog <- principal(df_hog_clean[,-1], nfactors = 1, rotate = "none")
+scores_hog <- data.frame(
+  Region = toupper(gsub(", provincia: .*", "", df_hog_clean$Provincia)),
+  Provincia = toupper(gsub(".*, provincia: ", "", df_hog_clean$Provincia)),
+  indice_hogar = pca_hog$scores[,1]
+) %>%
+  group_by(Region, Provincia) %>% summarize(indice_hogar = mean(indice_hogar, na.rm=TRUE), .groups='drop')
+
+# 4. Procesamiento Electoral (Ratio Castillo/Keiko)
+# Extraemos directamente las 3 columnas por su nombre original base
+elec_filtered <- df_elec_raw[, c("Distrito.electoral", "Organización.Política", "Votos")]
+# Las renombramos forzosamente (sin depender de dplyr)
+names(elec_filtered) <- c("Region", "Partido", "Votos")
+
+elec_filtered <- elec_filtered %>%
+  filter(grepl("FUERZA POPULAR|PERU LIBRE", Partido, ignore.case=TRUE))
+
+# Pivotamos para tener votos de cada uno como columnas
+elec_wide <- elec_filtered %>%
+  pivot_wider(names_from = Partido, values_from = Votos)
+
+names(elec_wide)[2:3] <- c("Keiko", "Castillo")
+elec_wide <- elec_wide %>%
+  mutate(ratio = Castillo / Keiko, Region = toupper(trimws(Region)))
+
+# 5. Unión de Datos (Merge Final)
+# Unimos hogar y vivienda por Región+Provincia, y le pegamos el ratio electoral por Región
+df_merged <- scores_viv %>%
+  inner_join(scores_hog, by = c("Region", "Provincia")) %>%
+  inner_join(elec_wide, by = "Region") %>%
+  distinct(Provincia, .keep_all = TRUE)
+
+df_merged <- na.omit(df_merged)
+rownames(df_merged) <- df_merged$Provincia
+cat("Base de datos final cruzada:", nrow(df_merged), "provincias listas para el análisis.\n")
+```
+
+---
+
+# Respuesta 1: Hipótesis de Regresión Lineal
+
+¿El ratio de votación Castillo/Keiko en 2021 estuvo influenciado por el índice de infraestructura y el índice de equipamiento? ¿Cuál tiene más efecto y es positivo o negativo?
+
+```{r pregunta1-regresion}
+# Estandarizamos para poder comparar la "fuerza" del efecto de ambos coeficientes directamente
+modelo <- lm(scale(ratio) ~ scale(indice_vivienda) + scale(indice_hogar), data = df_merged)
+resumen <- summary(modelo)
+print(resumen)
+
+# Extraer p-valores y coeficientes
+coeficientes <- coef(resumen)
+p_val_viv <- coeficientes[2, 4]
+p_val_hog <- coeficientes[3, 4]
+est_viv <- coeficientes[2, 1]
+est_hog <- coeficientes[3, 1]
+
+cat("\n--------------------------------------------------\n")
+cat("ANÁLISIS PREGUNTA 1:\n")
+cat("Efecto Infraestructura (Vivienda):", est_viv, " | p-value:", p_val_viv, "\n")
+cat("Efecto Equipamiento (Hogar):", est_hog, " | p-value:", p_val_hog, "\n\n")
+
+if(p_val_viv < 0.05 && p_val_hog < 0.05) {
+  if(est_viv > 0 && est_hog > 0) {
+    cat("=> RESPUESTA DETECTADA: en efecto, ambos covariados tienen efecto significativo y positivo\n")
+  } else if (est_viv < 0 && est_hog < 0) {
+    cat("=> RESPUESTA DETECTADA: en efecto, ambos covariados tienen efecto negativo\n")
+  }
+} else {
+  if (abs(est_hog) > abs(est_viv) && p_val_hog < p_val_viv) {
+    cat("=> RESPUESTA DETECTADA: es mas probable que el indice de equipamiento tenga efecto que el indice de infrastructura.\n")
+  } else {
+    cat("=> RESPUESTA DETECTADA: es mas probable que el indice de infrastructura tenga efecto que el indice de equipamiento\n")
+  }
+}
+```
+
+---
+
+# Respuesta 2 y 3: Análisis de Clustering
+
+Si utilizamos las variables (ratio, indice_vivienda, indice_hogar) para agrupar en 5 grupos, usaremos K-medoids (PAM), Jerárquico Aglomerativo (AGNES) y Jerárquico Divisivo (DIANA).
+¿Cuál técnica será la peor (peor Average Silhouette Width)?
+¿Cómo queda Urubamba clusterizada? (Si Silhouette es negativo, está mal clusterizada).
+
+```{r pregunta2-y-3-clustering}
+# Seleccionar y estandarizar variables
+data_cluster <- scale(df_merged %>% select(ratio, indice_vivienda, indice_hogar))
+
+# 1. K-medoids (PAM)
+set.seed(123)
+pam_res <- pam(data_cluster, k = 5)
+pam_sil <- silhouette(pam_res)
+pam_avg_sil <- mean(pam_sil[,3])
+
+# 2. AGNES (Jerárquico Aglomerativo, Ward)
+agnes_res <- agnes(data_cluster, method = "ward")
+agnes_groups <- cutree(agnes_res, k = 5)
+agnes_sil <- silhouette(agnes_groups, dist(data_cluster))
+agnes_avg_sil <- mean(agnes_sil[,3])
+
+# 3. DIANA (Jerárquico Divisivo)
+diana_res <- diana(data_cluster)
+diana_groups <- cutree(diana_res, k = 5)
+diana_sil <- silhouette(diana_groups, dist(data_cluster))
+diana_avg_sil <- mean(diana_sil[,3])
+
+cat("--------------------------------------------------\n")
+cat("ANÁLISIS PREGUNTA 2:\n")
+cat(sprintf("Silueta Promedio PAM: %.4f\n", pam_avg_sil))
+cat(sprintf("Silueta Promedio AGNES: %.4f\n", agnes_avg_sil))
+cat(sprintf("Silueta Promedio DIANA: %.4f\n\n", diana_avg_sil))
+
+peor_valor <- min(pam_avg_sil, agnes_avg_sil, diana_avg_sil)
+
+if(peor_valor == pam_avg_sil) {
+  cat("=> RESPUESTA Q2 DETECTADA: la tecnica de k-medoides será la peor opción\n")
+} else if (peor_valor == diana_avg_sil) {
+  cat("=> RESPUESTA Q2 DETECTADA: La tecnica jerarquica divisiva será la peor opción\n")
+} else if (peor_valor == agnes_avg_sil) {
+  cat("=> RESPUESTA Q2 DETECTADA: AGNES es la peor opción\n")
+}
+
+# Evaluar "La tecnica jerarquica aglomerativa será mejor que la divisiva"
+if (agnes_avg_sil > diana_avg_sil) {
+  cat("=> NOTA: La tecnica jerarquica aglomerativa resultó mejor que la divisiva.\n")
+}
+
+cat("\n--------------------------------------------------\n")
+cat("ANÁLISIS PREGUNTA 3 (Caso URUBAMBA):\n")
+
+# Extraer silueta de Urubamba (Revisando índice)
+idx_uru <- which(rownames(data_cluster) == "URUBAMBA")
+
+if(length(idx_uru) == 0) {
+  cat("URUBAMBA no se encontró en la base cruzada. Revisa si hay diferencias ortográficas (ej. URUBAMBA vs URUBAMBA).\n")
+} else {
+  uru_pam <- pam_sil[pam_sil[, "neighbor"] > 0 & rownames(pam_sil) == "URUBAMBA", 3]
+  if(length(uru_pam) == 0) uru_pam <- pam_sil[idx_uru, 3] # Fallback por si pierde rownames
+  
+  uru_agnes <- agnes_sil[idx_uru, 3]
+  uru_diana <- diana_sil[idx_uru, 3]
+  
+  mal_pam <- uru_pam < 0
+  mal_agnes <- uru_agnes < 0
+  mal_diana <- uru_diana < 0
+  
+  cat(sprintf("Silueta URUBAMBA en PAM: %.4f (Mal clusterizada: %s)\n", uru_pam, mal_pam))
+  cat(sprintf("Silueta URUBAMBA en AGNES: %.4f (Mal clusterizada: %s)\n", uru_agnes, mal_agnes))
+  cat(sprintf("Silueta URUBAMBA en DIANA: %.4f (Mal clusterizada: %s)\n\n", uru_diana, mal_diana))
+  
+  if(mal_pam && mal_agnes && mal_diana) {
+    cat("=> RESPUESTA Q3 DETECTADA: cierto\n")
+  } else if (mal_agnes && !mal_pam && !mal_diana) {
+    cat("=> RESPUESTA Q3 DETECTADA: Solo cierto en Agnes\n")
+  } else if (mal_pam && !mal_agnes && !mal_diana) {
+    cat("=> RESPUESTA Q3 DETECTADA: Solo cierto en PAM\n")
+  } else {
+    cat("=> RESPUESTA Q3 DETECTADA: No es cierto\n")
+  }
+}
+```
